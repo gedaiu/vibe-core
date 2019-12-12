@@ -9,3 +9,7 @@ vibe-core-test-*
 dub.selections.json
 vibe_core.lib
 tests/tests
+.trial
+trial_root.d
+trial-root
+trial.json
