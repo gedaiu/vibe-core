@@ -1,7 +1,7 @@
 /**
 	Contains interfaces and enums for evented I/O drivers.
 
-	Copyright: © 2012-2016 Sönke Ludwig
+	Copyright: © 2012-2020 Sönke Ludwig
 	Authors: Sönke Ludwig
 	License: Subject to the terms of the MIT license, as written in the included LICENSE.txt file.
 */
@@ -30,6 +30,8 @@ struct Task {
 		import std.concurrency : ThreadInfo, Tid;
 		static ThreadInfo s_tidInfo;
 	}
+
+	enum basePriority = 0x00010000;
 
 	private this(TaskFiber fiber, size_t task_counter)
 	@safe nothrow {
@@ -128,6 +130,27 @@ struct Task {
 	bool opEquals(in ref Task other) const @safe nothrow { return m_fiber is other.m_fiber && m_taskCounter == other.m_taskCounter; }
 	bool opEquals(in Task other) const @safe nothrow { return m_fiber is other.m_fiber && m_taskCounter == other.m_taskCounter; }
 }
+
+
+/** Settings to control the behavior of newly started tasks.
+*/
+struct TaskSettings {
+	/** Scheduling priority of the task
+
+		The priority of a task is roughly proportional to the amount of
+		times it gets scheduled in comparison to competing tasks. For
+		example, a task with priority 100 will be scheduled every 10 rounds
+		when competing against a task with priority 1000.
+
+		The default priority is defined by `basePriority` and has a value
+		of 65536. Priorities should be computed relative to `basePriority`.
+
+		A task with a priority of zero will only be executed if no other
+		non-zero task is competing.
+	*/
+	uint priority = Task.basePriority;
+}
+
 
 /**
 	Implements a task local storage variable.
@@ -316,7 +339,9 @@ final package class TaskFiber : Fiber {
 
 		Thread m_thread;
 		ThreadInfo m_tidInfo;
+		uint m_staticPriority, m_dynamicPriority;
 		shared ulong m_taskCounterAndFlags = 0; // bits 0-Flags.shiftAmount are flags
+
 		bool m_shutdown = false;
 
 		shared(ManualEvent) m_onExit;
@@ -384,6 +409,7 @@ final package class TaskFiber : Fiber {
 
 				TaskFuncInfo task;
 				swap(task, m_taskFunc);
+				m_dynamicPriority = m_staticPriority = task.settings.priority;
 				Task handle = this.task;
 				try {
 					atomicOp!"|="(m_taskCounterAndFlags, Flags.running); // set running
@@ -532,8 +558,8 @@ final package class TaskFiber : Fiber {
 		if (caller.m_thread is m_thread) {
 			auto thisus = () @trusted { return cast()this; } ();
 			debug (VibeTaskLog) logTrace("Resuming task with interrupt flag.");
-			auto defer = caller.m_yieldLockCount > 0 ? Yes.defer : No.defer;
-			taskScheduler.switchTo(thisus.task, defer);
+			auto defer = caller.m_yieldLockCount > 0;
+			taskScheduler.switchTo(thisus.task, defer ? TaskSwitchPriority.prioritized : TaskSwitchPriority.immediate);
 		} else {
 			debug (VibeTaskLog) logTrace("Set interrupt flag on task without resuming.");
 		}
@@ -616,11 +642,31 @@ final package class TaskFiber : Fiber {
 	}
 }
 
+
+/** Controls the priority to use for switching execution to a task.
+*/
+enum TaskSwitchPriority {
+	/** Rescheduled according to the tasks priority
+	*/
+	normal,
+
+	/** Rescheduled with maximum priority.
+
+		The task will resume as soon as the current task yields.
+	*/
+	prioritized,
+
+	/** Switch to the task immediately.
+	*/
+	immediate
+}
+
 package struct TaskFuncInfo {
 	void function(ref TaskFuncInfo) func;
 	void[2*size_t.sizeof] callable;
 	void[maxTaskParameterSize] args;
 	debug ulong functionPointer;
+	TaskSettings settings;
 
 	void set(CALLABLE, ARGS...)(ref CALLABLE callable, ref ARGS args)
 	{
@@ -715,7 +761,6 @@ package struct TaskScheduler {
 
 	private {
 		TaskFiberQueue m_taskQueue;
-		TaskFiber m_markerTask;
 	}
 
 	@safe:
@@ -738,8 +783,7 @@ package struct TaskScheduler {
 		debug (VibeTaskLog) logTrace("Yielding (interrupt=%s)", () @trusted { return (cast(shared)tf).getTaskStatus().interrupt; } ());
 		tf.handleInterrupt();
 		if (tf.m_queue !is null) return; // already scheduled to be resumed
-		m_taskQueue.insertBack(tf);
-		doYield(t);
+		doYieldAndReschedule(t);
 		tf.handleInterrupt();
 	}
 
@@ -846,13 +890,10 @@ package struct TaskScheduler {
 		if (t == Task.init) return; // not really a task -> no-op
 		auto tf = () @trusted { return t.taskFiber; } ();
 		if (tf.m_queue !is null) return; // already scheduled to be resumed
-		m_taskQueue.insertBack(tf);
-		doYield(t);
+		doYieldAndReschedule(t);
 	}
 
 	/** Holds execution until the task gets explicitly resumed.
-
-
 	*/
 	void hibernate()
 	{
@@ -872,7 +913,7 @@ package struct TaskScheduler {
 		This forces immediate execution of the specified task. After the tasks finishes or yields,
 		the calling task will continue execution.
 	*/
-	void switchTo(Task t, Flag!"defer" defer = No.defer)
+	void switchTo(Task t, TaskSwitchPriority priority)
 	{
 		auto thist = Task.getThis();
 
@@ -883,13 +924,16 @@ package struct TaskScheduler {
 
 		auto tf = () @trusted { return t.taskFiber; } ();
 		if (tf.m_queue) {
+			// don't reset the position of already scheduled tasks
+			if (priority == TaskSwitchPriority.normal) return;
+
 			debug (VibeTaskLog) logTrace("Task to switch to is already scheduled. Moving to front of queue.");
 			assert(tf.m_queue is &m_taskQueue, "Task is already enqueued, but not in the main task queue.");
 			m_taskQueue.remove(tf);
 			assert(!tf.m_queue, "Task removed from queue, but still has one set!?");
 		}
 
-		if (thist == Task.init && defer == No.defer) {
+		if (thist == Task.init && priority == TaskSwitchPriority.immediate) {
 			assert(TaskFiber.getThis().m_yieldLockCount == 0, "Cannot yield within an active yieldLock()!");
 			debug (VibeTaskLog) logTrace("switch to task from global context");
 			resumeTask(t);
@@ -899,12 +943,20 @@ package struct TaskScheduler {
 			assert(!thistf || !thistf.m_queue, "Calling task is running, but scheduled to be resumed!?");
 
 			debug (VibeTaskLog) logDebugV("Switching tasks (%s already in queue)", m_taskQueue.length);
-			if (defer) {
-				m_taskQueue.insertFront(tf);
-			} else {
-				m_taskQueue.insertFront(thistf);
-				m_taskQueue.insertFront(tf);
-				doYield(thist);
+			final switch (priority) {
+				case TaskSwitchPriority.normal:
+					reschedule(tf);
+					break;
+				case TaskSwitchPriority.prioritized:
+					tf.m_dynamicPriority = uint.max;
+					reschedule(tf);
+					break;
+				case TaskSwitchPriority.immediate:
+					tf.m_dynamicPriority = uint.max;
+					m_taskQueue.insertFront(thistf);
+					m_taskQueue.insertFront(tf);
+					doYield(thist);
+					break;
 			}
 		}
 	}
@@ -923,32 +975,25 @@ package struct TaskScheduler {
 			return ScheduleStatus.idle;
 
 
-		if (!m_markerTask) m_markerTask = new TaskFiber; // TODO: avoid allocating an actual task here!
-
-		scope (exit) assert(!m_markerTask.m_queue, "Marker task still in queue!?");
-
 		assert(Task.getThis() == Task.init, "TaskScheduler.schedule() may not be called from a task!");
-		assert(!m_markerTask.m_queue, "TaskScheduler.schedule() was called recursively!");
 
-		// keep track of the end of the queue, so that we don't process tasks
-		// infinitely
-		m_taskQueue.insertBack(m_markerTask);
+		if (m_taskQueue.empty) return ScheduleStatus.idle;
 
-		while (m_taskQueue.front !is m_markerTask) {
+		foreach (i; 0 .. m_taskQueue.length) {
 			auto t = m_taskQueue.front;
 			m_taskQueue.popFront();
+
+			// reset priority
+			t.m_dynamicPriority = t.m_staticPriority;
+
 			debug (VibeTaskLog) logTrace("resuming task");
 			auto task = t.task;
 			if (task != Task.init)
 				resumeTask(t.task);
 			debug (VibeTaskLog) logTrace("task out");
 
-			assert(!m_taskQueue.empty, "Marker task got removed from tasks queue!?");
-			if (m_taskQueue.empty) return ScheduleStatus.idle; // handle gracefully in release mode
+			if (m_taskQueue.empty) break;
 		}
-
-		// remove marker task
-		m_taskQueue.popFront();
 
 		debug (VibeTaskLog) logDebugV("schedule finished - %s tasks left in queue", m_taskQueue.length);
 
@@ -977,6 +1022,32 @@ package struct TaskScheduler {
 			// always pass Errors on
 			if (auto err = cast(Error)th) throw err;
 		}
+	}
+
+	private void reschedule(TaskFiber tf)
+	{
+		import std.algorithm.comparison : min;
+
+		// insert according to priority, limited to a priority
+		// factor of 1:10 in case of heavy concurrency
+		m_taskQueue.insertBackPred(tf, 10, (t) {
+			if (t.m_dynamicPriority >= tf.m_dynamicPriority)
+				return true;
+
+			// increase dynamic priority each time a task gets overtaken to
+			// ensure a fair schedule
+			t.m_dynamicPriority += min(t.m_staticPriority, uint.max - t.m_dynamicPriority);
+			return false;
+		});
+	}
+
+	private void doYieldAndReschedule(Task task)
+	{
+		auto tf = () @trusted { return task.taskFiber; } ();
+
+		reschedule(tf);
+
+		doYield(task);
 	}
 
 	private void doYield(Task task)
@@ -1041,6 +1112,32 @@ private struct TaskFiberQueue {
 		length++;
 	}
 
+	// inserts a task after the first task for which the predicate yields `true`,
+	// starting from the back. a maximum of max_skip tasks will be skipped
+	// before the task is inserted regardless of the predicate.
+	void insertBackPred(TaskFiber task, size_t max_skip,
+		scope bool delegate(TaskFiber) @safe nothrow pred)
+	{
+		assert(task.m_queue is null, "Task is already scheduled to be resumed!");
+		assert(task.m_prev is null, "Task has m_prev set without being in a queue!?");
+		assert(task.m_next is null, "Task has m_next set without being in a queue!?");
+
+		for (auto t = last; t; t = t.m_prev) {
+			if (!max_skip-- || pred(t)) {
+				task.m_queue = &this;
+				task.m_next = t.m_next;
+				if (task.m_next) task.m_next.m_prev = task;
+				t.m_next = task;
+				task.m_prev = t;
+				if (!task.m_next) last = task;
+				length++;
+				return;
+			}
+		}
+
+		insertFront(task);
+	}
+
 	void popFront()
 	{
 		if (first is last) last = null;
@@ -1084,6 +1181,60 @@ unittest {
 	q.insertFront(f1);
 	q.remove(f1);
 	assert(q.empty && q.length == 0);
+}
+
+unittest {
+	auto f1 = new TaskFiber;
+	auto f2 = new TaskFiber;
+	auto f3 = new TaskFiber;
+	auto f4 = new TaskFiber;
+	auto f5 = new TaskFiber;
+	auto f6 = new TaskFiber;
+	TaskFiberQueue q;
+
+	void checkQueue()
+	{
+		TaskFiber p;
+		for (auto t = q.front; t; t = t.m_next) {
+			assert(t.m_prev is p);
+			assert(t.m_next || t is q.last);
+			p = t;
+		}
+
+		TaskFiber n;
+		for (auto t = q.last; t; t = t.m_prev) {
+			assert(t.m_next is n);
+			assert(t.m_prev || t is q.first);
+			n = t;
+		}
+	}
+
+	q.insertBackPred(f1, 0, delegate bool(tf) { assert(false); });
+	assert(q.first is f1 && q.last is f1);
+	checkQueue();
+
+	q.insertBackPred(f2, 0, delegate bool(tf) { assert(false); });
+	assert(q.first is f1 && q.last is f2);
+	checkQueue();
+
+	q.insertBackPred(f3, 1, (tf) => false);
+	assert(q.first is f1 && q.last is f2);
+	assert(f1.m_next is f3);
+	assert(f3.m_prev is f1);
+	checkQueue();
+
+	q.insertBackPred(f4, 10, (tf) => false);
+	assert(q.first is f4 && q.last is f2);
+	checkQueue();
+
+	q.insertBackPred(f5, 10, (tf) => true);
+	assert(q.first is f4 && q.last is f5);
+	checkQueue();
+
+	q.insertBackPred(f6, 10, (tf) => tf is f4);
+	assert(q.first is f4 && q.last is f5);
+	assert(f4.m_next is f6);
+	checkQueue();
 }
 
 private struct FLSInfo {

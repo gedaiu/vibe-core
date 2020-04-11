@@ -1,7 +1,7 @@
 /**
 	This module contains the core functionality of the vibe.d framework.
 
-	Copyright: © 2012-2019 Sönke Ludwig
+	Copyright: © 2012-2020 Sönke Ludwig
 	License: Subject to the terms of the MIT license, as written in the included LICENSE.txt file.
 	Authors: Sönke Ludwig
 */
@@ -319,7 +319,7 @@ Task runTask(ARGS...)(void delegate(ARGS) @safe task, auto ref ARGS args)
 {
 	return runTask_internal!((ref tfi) { tfi.set(task, args); });
 }
-///
+/// ditto
 Task runTask(ARGS...)(void delegate(ARGS) @system task, auto ref ARGS args)
 @system {
 	return runTask_internal!((ref tfi) { tfi.set(task, args); });
@@ -330,6 +330,50 @@ Task runTask(CALLABLE, ARGS...)(CALLABLE task, auto ref ARGS args)
 {
 	return runTask_internal!((ref tfi) { tfi.set(task, args); });
 }
+/// ditto
+Task runTask(ARGS...)(TaskSettings settings, void delegate(ARGS) @safe task, auto ref ARGS args)
+{
+	return runTask_internal!((ref tfi) {
+		tfi.settings = settings;
+		tfi.set(task, args);
+	});
+}
+/// ditto
+Task runTask(ARGS...)(TaskSettings settings, void delegate(ARGS) @system task, auto ref ARGS args)
+@system {
+	return runTask_internal!((ref tfi) {
+		tfi.settings = settings;
+		tfi.set(task, args);
+	});
+}
+/// ditto
+Task runTask(CALLABLE, ARGS...)(TaskSettings settings, CALLABLE task, auto ref ARGS args)
+	if (!is(CALLABLE : void delegate(ARGS)) && is(typeof(CALLABLE.init(ARGS.init))))
+{
+	return runTask_internal!((ref tfi) {
+		tfi.settings = settings;
+		tfi.set(task, args);
+	});
+}
+
+
+unittest { // test proportional priority scheduling
+	auto tm = setTimer(1000.msecs, { assert(false, "Test timeout"); });
+	scope (exit) tm.stop();
+
+	size_t a, b;
+	auto t1 = runTask(TaskSettings(1), { while (a + b < 100) { a++; yield(); } });
+	auto t2 = runTask(TaskSettings(10), { while (a + b < 100) { b++; yield(); } });
+	runTask({
+		t1.join();
+		t2.join();
+		exitEventLoop();
+	});
+	runEventLoop();
+	assert(a + b == 100);
+	assert(b.among(90, 91, 92)); // expect 1:10 ratio +-1
+}
+
 
 /**
 	Runs an asyncronous task that is guaranteed to finish before the caller's
@@ -385,7 +429,7 @@ package Task runTask_internal(alias TFI_SETUP)()
 		() @trusted { TaskFiber.ms_taskEventCallback(TaskEvent.preStart, handle); } ();
 	}
 
-	s_scheduler.switchTo(handle, TaskFiber.getThis().m_yieldLockCount > 0 ? Flag!"defer".yes : Flag!"defer".no);
+	switchToTask(handle);
 
 	debug if (TaskFiber.ms_taskEventCallback) {
 		() @trusted { TaskFiber.ms_taskEventCallback(TaskEvent.postStart, handle); } ();
@@ -429,6 +473,21 @@ void runWorkerTask(alias method, T, ARGS...)(shared(T) object, auto ref ARGS arg
 	setupWorkerThreads();
 	st_workerPool.runTask!method(object, args);
 }
+/// ditto
+void runWorkerTask(FT, ARGS...)(TaskSettings settings, FT func, auto ref ARGS args)
+	if (isFunctionPointer!FT)
+{
+	setupWorkerThreads();
+	st_workerPool.runTask(settings, func, args);
+}
+
+/// ditto
+void runWorkerTask(alias method, T, ARGS...)(TaskSettings settings, shared(T) object, auto ref ARGS args)
+	if (is(typeof(__traits(getMember, object, __traits(identifier, method)))))
+{
+	setupWorkerThreads();
+	st_workerPool.runTask!method(settings, object, args);
+}
 
 /**
 	Runs a new asynchronous task in a worker thread, returning the task handle.
@@ -451,6 +510,20 @@ Task runWorkerTaskH(alias method, T, ARGS...)(shared(T) object, auto ref ARGS ar
 {
 	setupWorkerThreads();
 	return st_workerPool.runTaskH!method(object, args);
+}
+/// ditto
+Task runWorkerTaskH(FT, ARGS...)(TaskSettings settings, FT func, auto ref ARGS args)
+	if (isFunctionPointer!FT)
+{
+	setupWorkerThreads();
+	return st_workerPool.runTaskH(settings, func, args);
+}
+/// ditto
+Task runWorkerTaskH(alias method, T, ARGS...)(TaskSettings settings, shared(T) object, auto ref ARGS args)
+	if (is(typeof(__traits(getMember, object, __traits(identifier, method)))))
+{
+	setupWorkerThreads();
+	return st_workerPool.runTaskH!method(settings, object, args);
 }
 
 /// Running a worker task using a function
@@ -583,6 +656,19 @@ void runWorkerTaskDist(alias method, T, ARGS...)(shared(T) object, ARGS args)
 	setupWorkerThreads();
 	return st_workerPool.runTaskDist!method(object, args);
 }
+/// ditto
+void runWorkerTaskDist(FT, ARGS...)(TaskSettings settings, FT func, auto ref ARGS args)
+	if (is(typeof(*func) == function))
+{
+	setupWorkerThreads();
+	return st_workerPool.runTaskDist(settings, func, args);
+}
+/// ditto
+void runWorkerTaskDist(alias method, T, ARGS...)(TaskSettings settings, shared(T) object, ARGS args)
+{
+	setupWorkerThreads();
+	return st_workerPool.runTaskDist!method(settings, object, args);
+}
 
 
 /** Runs a new asynchronous task in all worker threads and returns the handles.
@@ -597,6 +683,13 @@ void runWorkerTaskDistH(HCB, FT, ARGS...)(scope HCB on_handle, FT func, auto ref
 {
 	setupWorkerThreads();
 	st_workerPool.runTaskDistH(on_handle, func, args);
+}
+/// ditto
+void runWorkerTaskDistH(HCB, FT, ARGS...)(TaskSettings settings, scope HCB on_handle, FT func, auto ref ARGS args)
+	if (is(typeof(*func) == function))
+{
+	setupWorkerThreads();
+	st_workerPool.runTaskDistH(settings, on_handle, func, args);
 }
 
 
@@ -715,13 +808,27 @@ void hibernate(scope void delegate() @safe nothrow on_interrupt = null)
 	This function can be used in conjunction with `hibernate` to wake up a
 	task. The task must live in the same thread as the caller.
 
-	See_Also: `hibernate`
+	If no priority is specified, `TaskSwitchPriority.prioritized` or
+	`TaskSwitchPriority.immediate` will be used, depending on whether a
+	yield lock is currently active.
+
+	Note that it is illegal to use `TaskSwitchPriority.immediate` if a yield
+	lock is active.
+
+	This function must only be called on tasks that belong to the calling
+	thread and have previously been hibernated!
+
+	See_Also: `hibernate`, `yieldLock`
 */
 void switchToTask(Task t)
 @safe nothrow {
-	import std.typecons : Yes, No;
-	auto defer = TaskFiber.getThis().m_yieldLockCount > 0 ? Yes.defer : No.defer;
-	s_scheduler.switchTo(t, defer);
+	auto defer = TaskFiber.getThis().m_yieldLockCount > 0;
+	s_scheduler.switchTo(t, defer ? TaskSwitchPriority.prioritized : TaskSwitchPriority.immediate);
+}
+/// ditto
+void switchToTask(Task t, TaskSwitchPriority priority)
+@safe nothrow {
+	s_scheduler.switchTo(t, priority);
 }
 
 
@@ -998,7 +1105,7 @@ void setTaskCreationCallback(TaskCreationCallback func)
 /**
 	A version string representing the current vibe.d core version
 */
-enum vibeVersionString = "1.8.1";
+enum vibeVersionString = "1.9.0";
 
 
 /**
@@ -1145,7 +1252,7 @@ struct Timer {
 	/** Resets the timer to the specified timeout
 	*/
 	void rearm(Duration dur, bool periodic = false) nothrow
-		in { assert(dur > 0.seconds, "Negative timer duration specified."); }
+		in { assert(dur >= 0.seconds, "Negative timer duration specified."); }
 		body { m_driver.timers.set(m_id, dur, periodic ? dur : 0.seconds); }
 
 	/** Resets the timer and avoids any firing.
@@ -1400,20 +1507,6 @@ private void setupSignalHandlers()
 // per process setup
 shared static this()
 {
-	version(Windows){
-		version(VibeLibeventDriver) enum need_wsa = true;
-		else version(VibeWin32Driver) enum need_wsa = true;
-		else enum need_wsa = false;
-		static if (need_wsa) {
-			logTrace("init winsock");
-			// initialize WinSock2
-			import core.sys.windows.winsock2;
-			WSADATA data;
-			WSAStartup(0x0202, &data);
-
-		}
-	}
-
 	s_isMainThread = true;
 
 	// COMPILER BUG: Must be some kind of module constructor order issue:
