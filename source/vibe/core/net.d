@@ -27,12 +27,12 @@ import core.time : Duration;
 	Setting use_dns to false will only allow IP address strings but also guarantees
 	that the call will not block.
 */
-NetworkAddress resolveHost(string host, AddressFamily address_family = AddressFamily.UNSPEC, bool use_dns = true)
+NetworkAddress resolveHost(string host, AddressFamily address_family = AddressFamily.UNSPEC, bool use_dns = true, Duration timeout = Duration.max)
 {
-	return resolveHost(host, cast(ushort)address_family, use_dns);
+	return resolveHost(host, cast(ushort)address_family, use_dns, timeout);
 }
 /// ditto
-NetworkAddress resolveHost(string host, ushort address_family, bool use_dns = true)
+NetworkAddress resolveHost(string host, ushort address_family, bool use_dns = true, Duration timeout = Duration.max)
 {
 	import std.socket : parseAddress;
 	version (Windows) import core.sys.windows.winsock2 : sockaddr_in, sockaddr_in6;
@@ -58,15 +58,19 @@ NetworkAddress resolveHost(string host, ushort address_family, bool use_dns = tr
 			cb => eventDriver.dns.lookupHost(host, cb),
 			(cb, id) => eventDriver.dns.cancelLookup(id),
 			(DNSLookupID, DNSStatus status, scope RefAddress[] addrs) {
-				if (status == DNSStatus.ok && addrs.length > 0) {
-					try res = NetworkAddress(addrs[0]);
-					catch (Exception e) { logDiagnostic("Failed to store address from DNS lookup: %s", e.msg); }
-					success = true;
+				if (status == DNSStatus.ok) {
+					foreach (addr; addrs) {
+						if (address_family != AddressFamily.UNSPEC && addr.addressFamily != address_family) continue;
+						try res = NetworkAddress(addr);
+						catch (Exception e) { logDiagnostic("Failed to store address from DNS lookup: %s", e.msg); }
+						success = true;
+						break;
+					}
 				}
 			}
 		);
 
-		asyncAwaitAny!(true, waitable);
+		asyncAwaitAny!(true, waitable)(timeout);
 
 		enforce(success, "Failed to lookup host '"~host~"'.");
 		return res;
@@ -365,16 +369,16 @@ struct NetworkAddress {
 
 	@property inout(sockaddr_in)* sockAddrInet4() inout pure nothrow
 		in { assert (family == AF_INET); }
-		body { return &addr_ip4; }
+		do { return &addr_ip4; }
 
 	@property inout(sockaddr_in6)* sockAddrInet6() inout pure nothrow
 		in { assert (family == AF_INET6); }
-		body { return &addr_ip6; }
+		do { return &addr_ip6; }
 
 	version (Posix) {
 		@property inout(sockaddr_un)* sockAddrUnix() inout pure nothrow
 			in { assert (family == AddressFamily.UNIX); }
-			body { return &addr_unix; }
+			do { return &addr_unix; }
 	}
 
 	/** Returns a string representation of the IP address

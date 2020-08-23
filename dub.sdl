@@ -1,10 +1,10 @@
 name "vibe-core"
 description "The I/O core library of vibe.d."
 authors "Sönke Ludwig"
-copyright "Copyright © 2016-2018, rejectedsoftware e.K."
+copyright "Copyright © 2016-2020, Sönke Ludwig"
 license "MIT"
 
-dependency "eventcore" version="~>0.8.43"
+dependency "eventcore" version="~>0.9.2"
 dependency "stdx-allocator" version="~>2.77.0"
 
 targetName "vibe_core"
@@ -19,6 +19,9 @@ configuration "winapi-optlink" {
 }
 configuration "epoll" {
 	subConfiguration "eventcore" "epoll"
+}
+configuration "cfrunloop" {
+	subConfiguration "eventcore" "cfrunloop"
 }
 configuration "kqueue" {
 	subConfiguration "eventcore" "kqueue"

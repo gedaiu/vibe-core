@@ -194,7 +194,7 @@ unittest {
 		// write-only property (NO)
 		@property void p3(int value) { privateJ = value; }
 		// ref returning property (OK)
-		@property ref int p4() { return i; }
+		@property ref int p4() return { return i; }
 		// parameter-less template property (OK)
 		@property ref int p5()() { return i; }
 		// not treated as a property by DMD, so not a field
@@ -204,7 +204,7 @@ unittest {
 		static @property int p7() { return k; }
 		static @property void p7(int value) { k = value; }
 
-		ref int f1() { return i; } // ref returning function (no field)
+		ref int f1() return { return i; } // ref returning function (no field)
 
 		int f2(Args...)(Args args) { return i; }
 
@@ -308,7 +308,7 @@ unittest { // normal fields
 		enum c = 42;
 		void f();
 		static void g();
-		ref int h() { return a; }
+		ref int h() return { return a; }
 		static ref int i() { return b; }
 	}
 	static assert(isNonStaticMember!(S, "a"));
@@ -414,11 +414,13 @@ template checkInterfaceConformance(T, I) {
 				static if (functionAttributes!F & FunctionAttribute.property) {
 					static if (PT.length > 0) {
 						static if (!is(typeof(mixin("function RT (ref T t)"~attribs~"{ return t."~mem~" = PT.init; }"))))
-							enum impl = T.stringof ~ " does not implement property setter \"" ~ mem ~ "\" of type " ~ FT.stringof;
+							enum impl = "`" ~ T.stringof ~ "` does not implement property setter `" ~
+								mem ~ "` of type `" ~ FT.stringof ~ "`";
 						else enum string impl = impl!(i+1);
 					} else {
 						static if (!is(typeof(mixin("function RT(ref T t)"~attribs~"{ return t."~mem~"; }"))))
-							enum impl = T.stringof ~ " does not implement property getter \"" ~ mem ~ "\" of type " ~ FT.stringof;
+							enum impl = "`" ~ T.stringof ~ "` does not implement property getter `" ~
+								mem ~ "` of type `" ~ FT.stringof ~ "`";
 						else enum string impl = impl!(i+1);
 					}
 				} else {
@@ -427,12 +429,14 @@ template checkInterfaceConformance(T, I) {
 							static if (mem == "write" && PT.length == 2) {
 								auto f = mixin("function void(ref T t, ref PT p)"~attribs~"{ t."~mem~"(p); }");
 							}
-							enum impl = T.stringof ~ " does not implement method \"" ~ mem ~ "\" of type " ~ FT.stringof;
+							enum impl = "`" ~ T.stringof ~ "` does not implement method `" ~
+								mem ~ "` of type `" ~ FT.stringof ~ "`";
 						}
 						else enum string impl = impl!(i+1);
 					} else {
 						static if (!is(typeof(mixin("function RT(ref T t, ref PT p)"~attribs~"{ return t."~mem~"(p); }"))))
-							enum impl = T.stringof ~ " does not implement method \"" ~ mem ~ "\" of type " ~ FT.stringof;
+							enum impl = "`" ~ T.stringof ~ "` does not implement method `" ~
+								mem ~ "` of type `" ~ FT.stringof ~ "`";
 						else enum string impl = impl!(i+1);
 					}
 				}
@@ -502,7 +506,7 @@ unittest {
 	}
 
 	static assert(checkInterfaceConformance!(NonOSStruct, OutputStream) ==
-		"NonOSStruct does not implement method \"flush\" of type @safe void()");
+		"`NonOSStruct` does not implement method `flush` of type `@safe void()`");
 
 	static struct NonOSStruct2 {
 		void write(in ubyte[] bytes) {} // not @safe
@@ -511,8 +515,16 @@ unittest {
 		void write(InputStream stream, ulong nbytes) {}
 	}
 
-	static assert(checkInterfaceConformance!(NonOSStruct2, OutputStream) ==
-		"NonOSStruct2 does not implement method \"write\" of type @safe void(const(ubyte[]) bytes)");
+    // `in` used to show up as `const` / `const scope`.
+    // With dlang/dmd#11474 it shows up as `in`.
+    // Remove when support for v2.093.0 is dropped
+    static if (checkInterfaceConformance!(NonOSStruct2, OutputStream) !=
+        "`NonOSStruct2` does not implement method `write` of type `@safe void(in ubyte[] bytes)`")
+    {
+        // Fallback to pre-2.092+
+        static assert(checkInterfaceConformance!(NonOSStruct2, OutputStream) ==
+            "`NonOSStruct2` does not implement method `write` of type `@safe void(const(ubyte[]) bytes)`");
+    }
 }
 
 string functionAttributeString(alias F)(bool restrictions_only)
