@@ -1,3 +1,52 @@
+1.11.0 - 2020-10-24
+===================
+
+- Added a concurrent mode to `pipe()` using `PipeMode.concurrent` to improve throughput in I/O limited situations - [pull #233][issue233]
+
+[issue233]: https://github.com/vibe-d/vibe-core/issues/233
+
+
+1.10.3 - 2020-10-15
+===================
+
+- Fixed `waitForDataEx` to return `WaitForDataStatus.timeout` for zero-timeouts if the connection is still alive [pull #232][issue232]
+
+[issue232]: https://github.com/vibe-d/vibe-core/issues/232
+
+
+1.10.2 - 2020-09-18
+===================
+
+- Fixed a critical data corruption bug caused by eventcore's `cancelRead`/`cancelWrite` - note that this fix makes `File.read` and `write` uninterruptible - [pull #227][issue227]
+- Fixed `InterfaceProxy!T` to behave correctly for `null` target instances - [pull #228][issue228]
+
+[issue227]: https://github.com/vibe-d/vibe-core/issues/227
+[issue228]: https://github.com/vibe-d/vibe-core/issues/228
+
+
+1.10.1 - 2020-08-31
+===================
+
+- Added support for upcoming DMD 2.094.0's `-preview=in` switch - [pull #225][pull225]
+
+[pull225]: https://github.com/vibe-d/vibe-core/issues/225
+
+
+1.10.0 - 2020-08-24
+===================
+
+- The minimum supported compiler has been raised to v2.079.0
+- The `log` (`log`, `logTrace`, `logInfo`...) in `vibe.core.log` have been simplified
+	to take the module/file/line as default runtime argument as opposed to compile-time - 
+	this could cause breakage if you were explicitly forwarding those arguments
+- Some places were previously using `logDebug` for full exception error message,
+	and were using various method to ensure `nothrow`ness.
+	All full exception stacktrace are now printed only in diagnostic mode.
+- Full details are available in [pull #212][pull212].
+
+[pull212]: https://github.com/vibe-d/vibe-core/issues/212
+
+
 1.9.4 - 2020-08-21
 ==================
 
@@ -5,7 +54,6 @@
 - Fix exclusion list to properly exclude broken LDC releases - [pull #221][issue221]
 - Workaround dub build by using `--single` in the test - [pull #223][issue223]
 - Cleanup deprecations in test-suite and update release notes - [pull #222][issue222]
-
 
 [issue220]: https://github.com/vibe-d/vibe-core/issues/220
 [issue221]: https://github.com/vibe-d/vibe-core/issues/221

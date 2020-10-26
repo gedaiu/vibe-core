@@ -127,8 +127,15 @@ struct Task {
 		return app.data;
 	}
 
-	bool opEquals(in ref Task other) const @safe nothrow { return m_fiber is other.m_fiber && m_taskCounter == other.m_taskCounter; }
-	bool opEquals(in Task other) const @safe nothrow { return m_fiber is other.m_fiber && m_taskCounter == other.m_taskCounter; }
+	// Remove me when `-preview=in` becomes the default
+	static if (is(typeof(mixin(q{(in ref int a) => a}))))
+		mixin(q{
+			bool opEquals(in ref Task other) const @safe nothrow {
+				return m_fiber is other.m_fiber && m_taskCounter == other.m_taskCounter;
+			}});
+	bool opEquals(in Task other) const @safe nothrow {
+		return m_fiber is other.m_fiber && m_taskCounter == other.m_taskCounter;
+	}
 }
 
 
@@ -399,8 +406,8 @@ final package class TaskFiber : Fiber {
 						debug (VibeTaskLog) logTrace("putting fiber to sleep waiting for new task...");
 						Fiber.yield();
 					} catch (Exception e) {
-						logWarn("CoreTaskFiber was resumed with exception but without active task!");
-						logDiagnostic("Full error: %s", e.toString().sanitize());
+						e.logException!(LogLevel.warn)(
+							"CoreTaskFiber was resumed with exception but without active task");
 					}
 					if (m_shutdown) return;
 				}
@@ -430,9 +437,7 @@ final package class TaskFiber : Fiber {
 						logDebug("Task exited while an interrupt was in flight.");
 				} catch (Exception e) {
 					debug if (ms_taskEventCallback) ms_taskEventCallback(TaskEvent.fail, handle);
-					import std.encoding;
-					logCritical("Task terminated with uncaught exception: %s", e.msg);
-					logDebug("Full error: %s", e.toString().sanitize());
+					e.logException!(LogLevel.critical)("Task terminated with uncaught exception");
 				}
 
 				debug assert(Thread.getThis() is m_thread, "Fiber moved?");
@@ -472,9 +477,8 @@ final package class TaskFiber : Fiber {
 				// make the fiber available for the next task
 				recycleFiber(this);
 			}
-		} catch(UncaughtException th) {
-			logCritical("CoreTaskFiber was terminated unexpectedly: %s", th.msg);
-			logDiagnostic("Full error: %s", th.toString().sanitize());
+		} catch (UncaughtException th) {
+			th.logException("CoreTaskFiber was terminated unexpectedly");
 		} catch (Throwable th) {
 			import std.stdio : stderr, writeln;
 			import core.stdc.stdlib : abort;
@@ -1016,8 +1020,7 @@ package struct TaskScheduler {
 			assert(th, "Fiber returned exception object that is not a Throwable!?");
 
 			assert(() @trusted nothrow { return t.fiber.state; } () == Fiber.State.TERM);
-			logError("Task terminated with unhandled exception: %s", th.msg);
-			logDebug("Full error: %s", () @trusted { return th.toString().sanitize; } ());
+			th.logException("Task terminated with unhandled exception");
 
 			// always pass Errors on
 			if (auto err = cast(Error)th) throw err;
